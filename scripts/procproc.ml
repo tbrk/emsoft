@@ -34,10 +34,20 @@ type conference = {
   articles  : article list;
 }
 
-let conferences = ref ([] : conference list)
+type committee = {
+  acronym   : string;
+  year      : year;
+  title     : string;
+  members   : name list;
+}
 
-let by_year { year = y1; _ } { year = y2; _ } = Int.compare y1 y2
-let by_year_rev { year = y1; _ } { year = y2; _ } = Int.compare y2 y1
+let conferences = ref ([] : conference list)
+let committees = ref ([] : committee list)
+
+let by_year ({ year = y1; _ } : conference)
+            ({ year = y2; _ } : conference) = Int.compare y1 y2
+let by_year_rev ({ year = y1; _ } : conference)
+                ({ year = y2; _ } : conference) = Int.compare y2 y1
 
 (* Poor man's conversion of unicode accents: avoid using camomile
    and installation (with dependencies, dune bugs, everything else...) *)
@@ -130,7 +140,7 @@ let to_output f filename =
   try f fout; close_out fout
   with e -> (close_out fout; raise e)
 
-let conference_fileroot { acronym; year; _ } =
+let conference_fileroot ({ acronym; year; _ } : conference) =
   Printf.sprintf "%s%d" (String.lowercase_ascii acronym) year
 
 (* Reverse lookups on name *)
@@ -191,6 +201,14 @@ let name_compare { last = l1; first = f1 } { last = l2; first = f2 } =
 let all_names () =
   List.sort name_compare
     (Hashtbl.fold (fun name _ names -> name :: names) name_hash [])
+
+let get_committee_members a y =
+  try
+    let { members; _ } =
+      List.find (fun ({ acronym; year; _ } : committee) -> acronym = a && year = y)
+                !committees
+    in members
+  with Not_found -> []
 
 let get_name_info = Hashtbl.find name_hash
 
@@ -325,6 +343,7 @@ module Html = struct
     else
       output_string out text
 
+  (* TODO: add structure for css framework and navigation links *)
   let template title make out =
     fprintf out {|
         <html>
@@ -344,13 +363,15 @@ module Html = struct
       linked_name' ~rel out cc)
 
   let index_entry out ({ title; where; published; chair; cochair; _ } as conf) =
+    let conffile = Filename.concat "confs" (conference_fileroot conf ^ ".html") in
     fprintf out {|
       <dt><a href="%s">%s</a></dt>
-      <dd>%s; %a; chairs: %a%a<dd>
-     |} (Filename.concat "confs" (conference_fileroot conf ^ ".html"))
+      <dd>%s; %a; chair%s: %a%a<dd>
+     |} conffile
         title
         where
         with_markdown_link published
+        (if cochair = None then "" else "s")
         (linked_name' ~rel:"") chair
         (cochair_opt ~rel:"") cochair
 
@@ -393,29 +414,50 @@ module Html = struct
   let article_list out articles = ignore
     (List.fold_left (output_article check_article_session out) "" articles)
 
+  let make_show_pc acronym year =
+    let members = get_committee_members acronym year in
+    if members <> [] then
+      (true, fun out ->
+               fprintf out {|
+                 <div class="conf-pc">
+                   <h2 id="section-pc">Program Committee</h2>%a
+                 </div>
+               |} (list_names (linked_name' ~rel:"..")) members)
+    else (false, Fun.const ())
+
   let conf site_title path
-           ({ title; chair; cochair; where; published; articles; _ } as conf) =
+           ({ acronym; year; title;
+              chair; cochair; where; published;
+              articles; _ } as conf) =
     let opt_cochair out =
       Option.iter
         (fprintf out "<dt>cochair</dt><dd>%a</dd>" (linked_name' ~rel:".."))
     in
+    let has_pc, show_pc = make_show_pc acronym year in
     to_output (template (site_title ^ ": " ^ title) (fun out ->
       fprintf out {|
           <h1>%s</h1>
           <div class="conf-info">
             <dl>
               <dt>chair</dt><dd>%a</dd>%a
+              %s
               <dt>where</dt><dd>%s</dd>
               <dt>published</dt><dd>%a</dd>
             </dl>
           </div>
           <div class="conf-articles">%a</div>
+          %t
         |} title
            (linked_name' ~rel:"..") chair
            opt_cochair cochair
+           (if has_pc
+            then {|<dt>committee</dt><dd><a href="#section-pc">see below</a></dd>|}
+            else "")
            where
            with_markdown_link published
            article_list articles
+           show_pc
+
     )) (Filename.concat path (conference_fileroot conf ^ ".html"))
 
   let participant_lists out groups =
@@ -446,23 +488,36 @@ module Html = struct
     to_output (template (site_title ^ ": participant index") (fun out ->
       let groups = group_by_first_letter names in
       fprintf out {|
-        <h1>%s: participant index</h1>
+        <h1>Participant Index</h1>
         <div class="links"><ul>%a</ul><div>
         <div class="participants">%a</div>
-       |} site_title index_links groups participant_lists groups
+       |} index_links groups participant_lists groups
     ))
+
+  (* TODO: link to PC page? *)
+  let output_pc_years was_chair was_cochair out =
+    let output_pc_year year =
+      fprintf out {|<li>%d%s%s</li>|}
+        year
+        (if was_chair year then " (chair)" else "")
+        (if was_cochair year then " (cochair)" else "")
+    in
+    List.iter output_pc_year
 
   let participant site_title path name =
     let first_last = string_of_name' name in
-    let Info { articles; _ } = get_name_info name in
+    let Info { articles; pcs; chair; cochair; _ } = get_name_info name in
     to_output (template (site_title ^ ": " ^ first_last) (fun out ->
       fprintf out {|
           <h1>%s</h1>
         |} first_last;
+      if pcs <> [] then
+        fprintf out "<h2>Program Committees</h2><ul>%a</ul>\n"
+          (output_pc_years (fun y -> List.mem y chair)
+                           (fun y -> List.mem y cochair)) (List.rev pcs);
       ignore (List.fold_left (output_article check_article_conference out)
                              "" articles)
     )) (Filename.concat path (string_of_name name ^ ".html"))
-    (* TODO: show PCs, cochairs, chairs *)
 
   let make site_title path =
     index site_title Filename.(concat path "index.html");
@@ -659,10 +714,12 @@ let read_conference fin =
 let read_pc fin =
   let seq = make_seq fin in
   let title, seq = expect_heading 1 seq in
-  let _, year = parse_conf_acronym_year title in
-  let names, seq = try_to_list' try_item seq in
-  List.(iter (add_pc year) (map parse_name names));
-  expect_end seq
+  let acronym, year = parse_conf_acronym_year title in
+  let members, seq = try_to_list' try_item seq in
+  let members = List.map parse_name members in
+  List.iter (add_pc year) members;
+  expect_end seq;
+  { acronym; year; title; members }
 
 (* Algorithms *)
 
@@ -670,7 +727,7 @@ let load_file filename =
   let fin = open_in filename in
   reset_filename filename;
   if ends_with ~suffix:"-pc.md" filename
-  then read_pc fin
+  then committees := read_pc fin :: !committees
   else conferences := read_conference fin :: !conferences;
   close_in fin
 
@@ -703,29 +760,34 @@ let make_name_summaries path =
   in
   List.iter summarize (all_names ())
 
-let output_author_pcs confs out { last; first } (Info { pcs; _ }) =
+let output_author_pcs (confs : conference list) out
+                      { last; first } (Info { pcs; _ }) =
   if pcs <> [] then begin
     output_string out last;
     output_char out ',';
     output_string out first;
-    List.iter (fun { year = y; _ } ->
+    List.iter (fun ({ year = y; _ } : conference) ->
                 output_string out (if List.mem y pcs then ",1" else ",0"))
       confs;
     output_char out '\n'
   end
 
-let output_author_confs confs out { last; first } (Info { articles; _ }) =
+let output_author_confs (confs : conference list) out
+                        { last; first } (Info { articles; _ }) =
   output_string out last;
   output_char out ',';
   output_string out first;
-  let at { title; _ } { conference; _ } = String.equal title conference in
+  let at ({ title; _ } : conference) { conference; _ } =
+    String.equal title conference
+  in
   List.iter (fun conf ->
       output_string out (if List.exists (at conf) articles then ",1" else ",0"))
     confs;
   output_char out '\n'
 
 let output_conf_headings out =
-  List.iter (fun { year; _ } -> output_char out ','; output_year out year)
+  List.iter (fun ({ year; _ } : conference) ->
+              output_char out ','; output_year out year)
 
 let make_pc_csv out =
   output_bom out;
@@ -743,6 +805,10 @@ let make_author_csv out =
   output_char out '\n';
   Hashtbl.iter (output_author_confs confs out) name_hash
 
+let make_html output_path =
+  let ({ acronym; _ } : conference) = List.hd !conferences in
+  Html.make (acronym ^ " Information") output_path
+
 let _ = Arg.parse [
     ("--print", Arg.Unit (fun () -> output_conferences stdout),
      "print conferences to stdout");
@@ -756,7 +822,7 @@ let _ = Arg.parse [
      "write pc summary to csv file");
     ("--author-csv", Arg.String (to_output make_author_csv),
      "write author summary to csv file");
-    ("--html", Arg.String (Html.make "testing"), (* TODO *)
+    ("--html", Arg.String make_html,
      "write html files to the given path");
   ]
   load_file
