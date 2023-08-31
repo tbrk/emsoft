@@ -19,5 +19,10 @@ summaries:
 	-@rm -rf by_name/*
 	$(PROCPROC) articles/*.md pc/*.md --summarize-by-name by_name
 
+html:
+	-@rm -rf ./www
+	@mkdir -p ./www
+	$(PROCPROC) articles/*.md pc/*.md --html ./www
+
 .PHONY: FORCE validate update authors summaries
 

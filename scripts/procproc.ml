@@ -24,6 +24,7 @@ type article = {
 type year = int
 
 type conference = {
+  acronym   : string;
   year      : year;
   title     : string;
   chair     : name;
@@ -33,7 +34,10 @@ type conference = {
   articles  : article list;
 }
 
+let conferences = ref ([] : conference list)
+
 let by_year { year = y1; _ } { year = y2; _ } = Int.compare y1 y2
+let by_year_rev { year = y1; _ } { year = y2; _ } = Int.compare y2 y1
 
 (* Poor man's removal of unicode accents *)
 let unimap = [
@@ -87,6 +91,14 @@ let convert_first s =
   in
   f unimap
 
+let to_output f filename =
+  let fout = open_out filename in
+  try f fout; close_out fout
+  with e -> (close_out fout; raise e)
+
+let conference_fileroot { acronym; year; _ } =
+  Printf.sprintf "%s%d" (String.lowercase_ascii acronym) year
+
 (* Reverse lookups on name *)
 
 type name_info = Info of {
@@ -131,6 +143,8 @@ let all_names () =
 
 let get_name_info = Hashtbl.find name_hash
 
+let first_letter_of_name { last; _ } = String.make 1 (convert_first last)
+
 (* Printing *)
 
 (* UTF-8 Byte Order Mark *)
@@ -149,6 +163,7 @@ let rec output_list output_item out xs =
       output_list output_item out xs
 
 let string_of_name { last; first } = last ^ ", " ^ first
+let string_of_name' { last; first } = first ^ " " ^ last
 
 let output_name out name = output_string out (string_of_name name)
 
@@ -176,15 +191,14 @@ let output_field out n v =
 let output_opt_field n out v =
   match v with None -> () | Some v -> output_field n out v
 
-let check_article_session out current_session { session; _ } =
-  if String.equal current_session session
-  then current_session
-  else (output_heading out 2 session; output_char out '\n'; session)
+let check_article project out previous article =
+  let current = project article in
+  if String.equal previous current
+  then previous
+  else (output_heading out 2 current; output_char out '\n'; current)
 
-let check_article_conference out current_conference { conference; _ } =
-  if String.equal current_conference conference
-  then current_conference
-  else (output_heading out 2 conference; output_char out '\n'; conference)
+let check_article_conference = check_article (fun { conference = c; _ } -> c)
+let check_article_session = check_article (fun { session = s; _ } -> s)
 
 let output_article check_current out current
     ({ title; authors; doi; url; _ } as article) =
@@ -226,6 +240,182 @@ let output_summary name (Info { articles; pcs; chair; cochair }) out =
   end);
   ignore (List.fold_left
             (output_article check_article_conference out) "" articles)
+
+(* HTML generation *)
+
+module Html = struct
+
+  let fprintf = Printf.fprintf
+
+  let linked_name_base to_string ~rel out ({ last; first } as name) =
+    let path = (if rel = "" then Fun.id else Filename.concat rel) "participants"
+    in
+    fprintf out {|<a href="%s">%s</a>|}
+      (Filename.concat path (string_of_name name ^ ".html"))
+      (to_string name)
+
+  let linked_name ~rel out name = linked_name_base string_of_name ~rel out name
+  let linked_name' ~rel out name = linked_name_base string_of_name' ~rel out name
+
+  let list_names ln out names =
+    fprintf out "<ul>";
+    List.iter (fprintf out "<li>%a</li>" ln) names;
+    fprintf out "</ul>"
+
+  (* TODO: handle markdown links ; both []() and <> *)
+  let with_markdown_link out text = fprintf out "TODO: %s" text
+
+  let template title make out =
+    fprintf out {|
+        <html>
+          <head>
+            <meta charset="UTF-8" />
+            <title>%s</title>
+          </head>
+          <body>
+          %t
+          </body>
+        </html>
+     |} title make
+
+  let cochair_opt ~rel out =
+    Option.iter (fun cc ->
+      output_string out " and ";
+      linked_name' ~rel out cc)
+
+  let index_entry out ({ title; where; published; chair; cochair; _ } as conf) =
+    fprintf out {|
+      <dt><a href="%s">%s</a></dt>
+      <dd>%s; %a; chairs: %a%a<dd>
+     |} (Filename.concat "confs" (conference_fileroot conf ^ ".html"))
+        title
+        where
+        with_markdown_link published
+        (linked_name' ~rel:"") chair
+        (cochair_opt ~rel:"") cochair
+
+  let index site_title =
+    to_output (template site_title (fun out ->
+      fprintf out "<h1>%s</h1><dl>%a</dl>"
+        site_title
+        (fun out -> List.iter (index_entry out))
+        (List.(sort by_year_rev !conferences))
+    ))
+
+  let check_article project out previous article =
+    let current = project article in
+    if String.equal previous current
+    then previous
+    else (fprintf out "<h2>%s</h2>" current; current)
+
+  let check_article_conference = check_article (fun { conference = c; _ } -> c)
+  let check_article_session = check_article (fun { session = s; _ } -> s)
+
+  let output_opt_li out = function
+    | None -> ()
+    | Some v -> fprintf out {|<li>%a</li>|} with_markdown_link v
+
+  let output_article check_current out current
+      ({ title; authors; doi; url; _ } as article) =
+    let current = check_current out current article in
+    fprintf out {|
+        <div class="article">
+          <h3>%s</h3>
+          <div class="authors">%a</div>
+          <div class="links"><ul>%a%a</ul></div>
+        </div>
+      |} title
+         (list_names (linked_name' ~rel:"..")) authors
+         output_opt_li doi
+         output_opt_li url;
+    current
+
+  let article_list out articles = ignore
+    (List.fold_left (output_article check_article_session out) "" articles)
+
+  let conf site_title path
+           ({ title; chair; cochair; where; published; articles; _ } as conf) =
+    let opt_cochair out =
+      Option.iter
+        (fprintf out "<dt>cochair</dt><dd>%a</dd>" (linked_name' ~rel:".."))
+    in
+    to_output (template (site_title ^ ": " ^ title) (fun out ->
+      fprintf out {|
+          <h1>%s</h1>
+          <div class="conf-info">
+            <dl>
+              <dt>chair</dt><dd>%a</dd>%a
+              <dt>where</dt><dd>%s</dd>
+              <dt>published</dt><dd>%s</dd>
+            </dl>
+          </div>
+          <div class="conf-articles">%a</div>
+        |} title
+           (linked_name' ~rel:"..") chair
+           opt_cochair cochair
+           where published article_list articles
+    )) (Filename.concat path (conference_fileroot conf ^ ".html"))
+
+  let participant_lists out groups =
+    let show_group (c, group) =
+      fprintf out {|<h2 id="section-%s">%s</h2>|} c c;
+      list_names (linked_name ~rel:"") out group
+    in
+    List.iter show_group groups
+
+  let index_links out groups =
+    let show_group (c, _) =
+      fprintf out {|<li><a href="#section-%s">%s</a></li>|} c c
+    in
+    List.iter show_group groups
+
+  let group_by_first_letter names =
+    let f groups name =
+      let cn = String.uppercase_ascii (first_letter_of_name name) in
+      match groups with
+      | [] -> [(cn, [name])]
+      | (cg, group) :: groups' when cn = cg -> (cg, name :: group) :: groups'
+      | groups' -> (cn, [name]) :: groups'
+    in
+    List.fold_left f [] names
+    |> List.rev_map (fun (cg, group) -> (cg, List.rev group))
+
+  let participant_index site_title names =
+    to_output (template (site_title ^ ": participant index") (fun out ->
+      let groups = group_by_first_letter names in
+      fprintf out {|
+        <h1>%s: participant index</h1>
+        <div class="links"><ul>%a</ul><div>
+        <div class="participants">%a</div>
+       |} site_title index_links groups participant_lists groups
+    ))
+
+  let participant site_title path name =
+    let first_last = string_of_name' name in
+    let Info { articles; _ } = get_name_info name in
+    to_output (template (site_title ^ ": " ^ first_last) (fun out ->
+      fprintf out {|
+          <h1>%s</h1>
+        |} first_last;
+      ignore (List.fold_left (output_article check_article_conference out)
+                             "" articles)
+    )) (Filename.concat path (string_of_name name ^ ".html"))
+    (* TODO: show PCs, cochairs, chairs *)
+
+  let make site_title path =
+    index site_title Filename.(concat path "index.html");
+    (* conferences *)
+    let confs_path = Filename.(concat path "confs") in
+    Sys.mkdir confs_path 0o777;
+    List.(iter (conf site_title confs_path) !conferences);
+    (* participants *)
+    let names = all_names () in
+    participant_index site_title names Filename.(concat path "participants.html");
+    let participants_path = Filename.(concat path "participants") in
+    Sys.mkdir participants_path 0o777;
+    List.iter (participant site_title participants_path) names
+
+end
 
 (* Parsing *)
 
@@ -393,7 +583,7 @@ let expect_chairs seq =
 let read_conference fin =
   let seq = make_seq fin in
   let title, seq = expect_heading 1 seq in
-  let _, year = parse_conf_acronym_year title in
+  let acronym, year = parse_conf_acronym_year title in
   let chair, cochair, seq = expect_chairs seq in
   add_chair year chair;
   Option.iter (add_cochair year) cochair;
@@ -402,7 +592,7 @@ let read_conference fin =
   let session, seq = expect_heading 2 seq in
   let articles, seq = expect_articles (title, session) seq in
   expect_end seq;
-  { title; year; chair; cochair; where; published; articles }
+  { title; acronym; year; chair; cochair; where; published; articles }
 
 let read_pc fin =
   let seq = make_seq fin in
@@ -413,8 +603,6 @@ let read_pc fin =
   expect_end seq
 
 (* Algorithms *)
-
-let conferences = ref []
 
 let load_file filename =
   let fin = open_in filename in
@@ -432,11 +620,6 @@ let output_conferences_to_file filename =
   output_conferences fout;
   close_out fout
 
-let to_output f filename =
-  let fout = open_out filename in
-  try f fout; close_out fout
-  with e -> (close_out fout; raise e)
-
 let print_authors outc =
   List.(iter (fun { articles; _ } ->
                 iter (fun { authors; _ } ->
@@ -444,9 +627,8 @@ let print_authors outc =
         (rev !conferences))
 
 let make_name_summaries path =
-  let make_path ({ last; _ } as name) =
-    let first_letter = String.make 1 (convert_first last) in
-    let path = Filename.concat path first_letter in
+  let make_path name =
+    let path = Filename.concat path (first_letter_of_name name) in
     (try Unix.mkdir path 0o777 with Unix.(Unix_error (EEXIST, _, _)) -> ());
     Filename.concat path (string_of_name name ^ ".md")
   in
@@ -512,6 +694,8 @@ let _ = Arg.parse [
      "write pc summary to csv file");
     ("--author-csv", Arg.String (to_output make_author_csv),
      "write author summary to csv file");
+    ("--html", Arg.String (Html.make "testing"), (* TODO *)
+     "write html files to the given path");
   ]
   load_file
   "procproc: process article files"
