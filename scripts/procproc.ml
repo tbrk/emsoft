@@ -1,4 +1,4 @@
-#!/usr/bin/env -S ocaml unix.cma
+#!/usr/bin/env -S ocaml str.cma unix.cma 
 
 (*
   2022-12-18 T. Bourke
@@ -39,36 +39,70 @@ let conferences = ref ([] : conference list)
 let by_year { year = y1; _ } { year = y2; _ } = Int.compare y1 y2
 let by_year_rev { year = y1; _ } { year = y2; _ } = Int.compare y2 y1
 
-(* Poor man's removal of unicode accents *)
+(* Poor man's conversion of unicode accents: avoid using camomile
+   and installation (with dependencies, dune bugs, everything else...) *)
 let unimap = [
   ("Å", 'a');
+  ("å", 'a');
   ("Á", 'a');
+  ("á", 'a');
   ("À", 'a');
+  ("à", 'a');
   ("Â", 'a');
+  ("â", 'a');
   ("Ä", 'a');
+  ("ä", 'a');
   ("Ă", 'a');
+  ("ă", 'a');
   ("É", 'e');
+  ("é", 'e');
   ("È", 'e');
+  ("è", 'e');
   ("Ê", 'e');
+  ("ê", 'e');
   ("Ë", 'e');
+  ("ë", 'e');
   ("Í", 'i');
+  ("í", 'i');
   ("Ì", 'i');
+  ("ì", 'i');
   ("Î", 'i');
+  ("î", 'i');
   ("Ï", 'i');
+  ("ï", 'i');
   ("ı", 'i');
+  ("ñ", 'n');
   ("Ó", 'o');
+  ("ó", 'o');
   ("Ò", 'o');
+  ("ò", 'o');
   ("Ô", 'o');
+  ("ô", 'o');
   ("Ö", 'o');
+  ("ö", 'o');
   ("Ú", 'u');
+  ("ú", 'u');
   ("Ù", 'u');
+  ("ù", 'u');
   ("Û", 'u');
+  ("û", 'u');
   ("Ü", 'u');
+  ("ü", 'u');
   ("Ç", 'c');
+  ("ç", 'c');
+  ("Ć", 'c');
+  ("ć", 'c');
   ("Č", 'c');
+  ("č", 'c');
   ("Ș", 's');
+  ("ş", 's');
+  ("Š", 's');
+  ("š", 's');
   ("Ț", 't');
+  ("ț", 't');
+  ("ý", 'y');
   ("ẞ", 's');
+  ("ß", 's');
   ]
 
 (* Not available under OCaml 4.11.1 *)
@@ -85,8 +119,8 @@ let ends_with ~suffix s =
 
 let convert_first s =
   let rec f = function
-    | [] -> Char.lowercase_ascii s.[0]
-    | (m, c) :: mcs when starts_with ~prefix:m s -> c
+    | [] -> (Char.lowercase_ascii s.[0], 1)
+    | (m, c) :: mcs when starts_with ~prefix:m s -> (c, String.length m)
     | _ :: mcs -> f mcs
   in
   f unimap
@@ -134,16 +168,31 @@ let add_cochair year =
   name_map (fun (Info ({ cochair; _ } as info)) ->
               (Info { info with cochair = year :: cochair }))
 
+let first_letter_of_name { last; _ } = String.make 1 (fst (convert_first last))
+
+(* Ensure that ordering last names groups them by first charactder from A - Z,
+   ignoring accents and case. Does not handle region-specific rules (e.g.,
+   "van" is ignored when sorting last names of the Dutch, but not necessarily
+   Dutch last names...). *)
+let rec string_compare s1 s2 =
+  if s1 = "" then -1
+  else if s2 = "" then 1
+  else let c1, l1 = convert_first s1 in
+       let c2, l2 = convert_first s2 in
+       match Char.(compare c1 c2) with
+       | 0 ->
+           string_compare String.(sub s1 l1 (length s1 - l1))
+                          String.(sub s2 l2 (length s2 - l2))
+       | n -> n
+
 let name_compare { last = l1; first = f1 } { last = l2; first = f2 } =
-  match String.compare l1 l2 with 0 -> String.compare f1 f2 | n -> n
+  match string_compare l1 l2 with 0 -> string_compare f1 f2 | n -> n
 
 let all_names () =
   List.sort name_compare
     (Hashtbl.fold (fun name _ names -> name :: names) name_hash [])
 
 let get_name_info = Hashtbl.find name_hash
-
-let first_letter_of_name { last; _ } = String.make 1 (convert_first last)
 
 (* Printing *)
 
@@ -262,8 +311,19 @@ module Html = struct
     List.iter (fprintf out "<li>%a</li>" ln) names;
     fprintf out "</ul>"
 
-  (* TODO: handle markdown links ; both []() and <> *)
-  let with_markdown_link out text = fprintf out "TODO: %s" text
+  let markdown_link_re = Str.regexp {|[ 	]*\[\(.*\)\](\(.*\))|}
+  let markdown_url_re = Str.regexp {|<\(.*\)>|}
+
+  let with_markdown_link out text =
+    if Str.string_match markdown_url_re text 0 then
+      let url = Str.matched_group 1 text in
+      fprintf out {|<a href="%s">%s</a>|} url url
+    else if Str.string_match markdown_link_re text 0 then
+      let label = Str.matched_group 1 text in
+      let url = Str.matched_group 2 text in
+      fprintf out {|<a href="%s">%s</a>|} url label
+    else
+      output_string out text
 
   let template title make out =
     fprintf out {|
@@ -346,14 +406,16 @@ module Html = struct
             <dl>
               <dt>chair</dt><dd>%a</dd>%a
               <dt>where</dt><dd>%s</dd>
-              <dt>published</dt><dd>%s</dd>
+              <dt>published</dt><dd>%a</dd>
             </dl>
           </div>
           <div class="conf-articles">%a</div>
         |} title
            (linked_name' ~rel:"..") chair
            opt_cochair cochair
-           where published article_list articles
+           where
+           with_markdown_link published
+           article_list articles
     )) (Filename.concat path (conference_fileroot conf ^ ".html"))
 
   let participant_lists out groups =
