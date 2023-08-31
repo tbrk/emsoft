@@ -140,14 +140,17 @@ let to_output f filename =
   try f fout; close_out fout
   with e -> (close_out fout; raise e)
 
-let conference_fileroot ({ acronym; year; _ } : conference) =
+let conference_fileroot' acronym year =
   Printf.sprintf "%s%d" (String.lowercase_ascii acronym) year
+
+let conference_fileroot ({ acronym; year; _ } : conference) =
+  conference_fileroot' acronym year
 
 (* Reverse lookups on name *)
 
 type name_info = Info of {
   articles : article list;
-  pcs : year list;
+  pcs : (string * year) list;
   chair : year list;
   cochair : year list;
 }
@@ -294,7 +297,7 @@ module Markdown = struct
     output_char out '\n';
     ignore (List.fold_left (output_article check_article_session out) "" articles)
 
-  let output_pc_year was_chair was_cochair out year =
+  let output_pc_year was_chair was_cochair out (_, year) =
     output_year out year;
     if was_chair year then output_string out " (chair)"
     else if was_cochair year then output_string out " (cochair)"
@@ -500,10 +503,14 @@ module Html = struct
        |} index_links groups participant_lists groups
     ))
 
-  (* TODO: link to PC page? *)
   let output_pc_years was_chair was_cochair out =
-    let output_pc_year year =
-      fprintf out {|<li>%d%s%s</li>|}
+    let output_pc_year (acronym, year) =
+      let conffile =
+        Filename.(concat ".."
+                   (concat "confs" (conference_fileroot' acronym year ^ ".html")))
+      in
+      fprintf out {|<li><a href="%s#section-pc">%d%s%s</a></li>|}
+        conffile
         year
         (if was_chair year then " (chair)" else "")
         (if was_cochair year then " (cochair)" else "")
@@ -723,7 +730,7 @@ let read_pc fin =
   let acronym, year = parse_conf_acronym_year title in
   let members, seq = try_to_list' try_item seq in
   let members = List.map parse_name members in
-  List.iter (add_pc year) members;
+  List.iter (add_pc (acronym, year)) members;
   expect_end seq;
   { acronym; year; title; members }
 
@@ -772,8 +779,8 @@ let output_author_pcs (confs : conference list) out
     output_string out last;
     output_char out ',';
     output_string out first;
-    List.iter (fun ({ year = y; _ } : conference) ->
-                output_string out (if List.mem y pcs then ",1" else ",0"))
+    List.iter (fun ({ acronym = a; year = y; _ } : conference) ->
+                output_string out (if List.mem (a, y) pcs then ",1" else ",0"))
       confs;
     output_char out '\n'
   end
