@@ -333,10 +333,10 @@ module Html = struct
   let linked_name ~rel out name = linked_name_base string_of_name ~rel out name
   let linked_name' ~rel out name = linked_name_base string_of_name' ~rel out name
 
-  let list_names ln out names =
-    fprintf out "<ul>";
+  let list_names ~cls ln out names =
+    fprintf out {|<ul class="%s">|} cls;
     List.iter (fprintf out "<li>%a</li>" ln) names;
-    fprintf out "</ul>"
+    fprintf out {|</ul>|}
 
   let markdown_link_re = Str.regexp {|[ 	]*\[\(.*\)\](\(.*\))|}
   let markdown_url_re = Str.regexp {|<\(.*\)>|}
@@ -353,18 +353,22 @@ module Html = struct
       output_string out text
 
   (* TODO: add structure for css framework and navigation links *)
-  let template title make out =
+  let template ?rel title make out =
+    let rootpath = match rel with None -> "" | Some s -> s ^ "/" in
     fprintf out {|
         <html>
           <head>
-            <meta charset="UTF-8" />
             <title>%s</title>
+            <meta charset="UTF-8" />
+            <link rel="stylesheet" href="%sstyle.css">
           </head>
           <body>
-          %t
+          <div id="main">
+            %t
+          </div>
           </body>
         </html>
-     |} title make
+     |} title rootpath make
 
   let cochair_opt ~rel out =
     Option.iter (fun cc ->
@@ -375,7 +379,13 @@ module Html = struct
     let conffile = Filename.concat "confs" (conference_fileroot conf ^ ".html") in
     fprintf out {|
       <dt><a href="%s">%s</a></dt>
-      <dd>%s; %a; chair%s: %a%a<dd>
+      <dd>
+        <ul>
+          <li><span class="where">%s</span></li>
+          <li><span class="published">published: %a</span></li>
+          <li><span class="chairs">chair%s: %a%a</span></li>
+        </ul>
+      <dd>
      |} conffile
         title
         where
@@ -386,7 +396,17 @@ module Html = struct
 
   let index site_title =
     to_output (template site_title (fun out ->
-      fprintf out "<h1>%s</h1><dl>%a</dl>"
+      fprintf out {|
+          <h1>%s</h1>
+          <p>These pages are generated from the
+             <a href="https://github.com/ACM-SIGBED/emsoft/tree/main">ACM-SIGBED/emsoft</a>
+             repository on github. To fix an error or add a link, please make
+             a pull request.
+          </p>
+          <p>There is an index of <a href="participants.html">participants</a>
+             (authors and program committee members).</p>
+          <dl class="conf-index">%a</dl>
+        |}
         site_title
         (fun out -> List.iter (index_entry out))
         (List.(sort by_year_rev !conferences))
@@ -411,11 +431,11 @@ module Html = struct
     fprintf out {|
         <div class="article">
           <h3>%s</h3>
-          <div class="authors">%a</div>
-          <div class="links"><ul>%a%a</ul></div>
+          <div class="article-authors">%a</div>
+          <div class="article-links"><ul>%a%a</ul></div>
         </div>
       |} title
-         (list_names (linked_name' ~rel:"..")) authors
+         (list_names ~cls:"comma-list" (linked_name' ~rel:"..")) authors
          output_opt_li doi
          output_opt_li url;
     current
@@ -431,7 +451,7 @@ module Html = struct
                  <div class="conf-pc">
                    <h2 id="section-pc">Program Committee</h2>%a
                  </div>
-               |} (list_names (linked_name' ~rel:"..")) members)
+               |} (list_names ~cls:"name-list" (linked_name' ~rel:"..")) members)
     else (false, Fun.const ())
 
   let conf site_title path
@@ -440,27 +460,30 @@ module Html = struct
               articles; _ } as conf) =
     let opt_cochair out =
       Option.iter
-        (fprintf out "<dt>cochair</dt><dd>%a</dd>" (linked_name' ~rel:".."))
+        (fprintf out "<dt>cochair:</dt><dd>%a</dd>" (linked_name' ~rel:".."))
     in
     let has_pc, show_pc = make_show_pc acronym year in
-    to_output (template (site_title ^ ": " ^ title) (fun out ->
+    to_output (template ~rel:".." (site_title ^ ": " ^ title) (fun out ->
       fprintf out {|
           <h1>%s</h1>
+          <div id="menu">
+            <a href="../index.html">(return to main page)</a>
+          </div>
           <div class="conf-info">
             <dl>
-              <dt>chair</dt><dd>%a</dd>%a
+              <dt>chair:</dt><dd>%a</dd>%a
               %s
-              <dt>where</dt><dd>%s</dd>
-              <dt>published</dt><dd>%a</dd>
+              <dt>where:</dt><dd>%s</dd>
+              <dt>published:</dt><dd>%a</dd>
             </dl>
           </div>
-          <div class="conf-articles">%a</div>
+          <div class="dimmed-h2">%a</div>
           %t
         |} title
            (linked_name' ~rel:"..") chair
            opt_cochair cochair
            (if has_pc
-            then {|<dt>committee</dt><dd><a href="#section-pc">see below</a></dd>|}
+            then {|<dt>Committee:</dt><dd><a href="#section-pc">see below</a></dd>|}
             else "")
            where
            with_markdown_link published
@@ -471,8 +494,8 @@ module Html = struct
 
   let participant_lists out groups =
     let show_group (c, group) =
-      fprintf out {|<h2 id="section-%s">%s</h2>|} c c;
-      list_names (linked_name ~rel:"") out group
+      fprintf out {|<hr/><h2 id="section-%s">%s</h2>|} c c;
+      list_names ~cls:"name-list" (linked_name ~rel:"") out group
     in
     List.iter show_group groups
 
@@ -498,7 +521,10 @@ module Html = struct
       let groups = group_by_first_letter names in
       fprintf out {|
         <h1>Participant Index</h1>
-        <div class="links"><ul>%a</ul><div>
+        <div id="menu">
+          <a href="../index.html">(return to main page)</a>
+        </div>
+        <div class="index-links"><ul>%a</ul></div>
         <div class="participants">%a</div>
        |} index_links groups participant_lists groups
     ))
@@ -520,29 +546,32 @@ module Html = struct
   let participant site_title path name =
     let first_last = string_of_name' name in
     let Info { articles; pcs; chair; cochair; _ } = get_name_info name in
-    to_output (template (site_title ^ ": " ^ first_last) (fun out ->
+    to_output (template ~rel:".." (site_title ^ ": " ^ first_last) (fun out ->
       fprintf out {|
           <h1>%s</h1>
         |} first_last;
       if pcs <> [] then
-        fprintf out "<h2>Program Committees</h2><ul>%a</ul>\n"
+        fprintf out {|<div class="comma-list-label">Program Committees:</div>
+                      <ul class="comma-list">%a</ul></p>|}
           (output_pc_years (fun y -> List.mem y chair)
                            (fun y -> List.mem y cochair)) (List.rev pcs);
+      output_string out {|<div class="dimmed-h2">|};
       ignore (List.fold_left (output_article check_article_conference out)
-                             "" articles)
+                             "" articles);
+      output_string out {|</div>|}
     )) (Filename.concat path (string_of_name name ^ ".html"))
 
   let make site_title path =
     index site_title Filename.(concat path "index.html");
     (* conferences *)
     let confs_path = Filename.(concat path "confs") in
-    Sys.mkdir confs_path 0o777;
+    (try Sys.mkdir confs_path 0o777 with Sys_error _ -> ());
     List.(iter (conf site_title confs_path) !conferences);
     (* participants *)
     let names = all_names () in
     participant_index site_title names Filename.(concat path "participants.html");
     let participants_path = Filename.(concat path "participants") in
-    Sys.mkdir participants_path 0o777;
+    (try Sys.mkdir participants_path 0o777 with Sys_error _ -> ());
     List.iter (participant site_title participants_path) names
 
 end
