@@ -212,25 +212,19 @@ let get_committee_members a y =
 
 let get_name_info = Hashtbl.find name_hash
 
-(* Printing *)
+let string_of_name { last; first } = last ^ ", " ^ first
+let string_of_name' { last; first } = first ^ " " ^ last
 
-(* UTF-8 Byte Order Mark *)
-let output_bom out =
-  output_char out '\xEF';
-  output_char out '\xBB';
-  output_char out '\xBF'
+(* Output *)
 
-let rec output_list output_item out xs =
+let rec output_bar_list output_item out xs =
   match xs with
   | []    -> ()
   | [x]   -> output_item out x; output_char out '\n'
   | x::xs ->
       output_item out x;
       output_string out " | ";
-      output_list output_item out xs
-
-let string_of_name { last; first } = last ^ ", " ^ first
-let string_of_name' { last; first } = first ^ " " ^ last
+      output_bar_list output_item out xs
 
 let output_name out name = output_string out (string_of_name name)
 
@@ -238,75 +232,87 @@ let output_name_endline out name =
   output_name out name;
   output_char out '\n'
 
-let rec output_names = output_list output_name
-
-let output_heading out n s =
-  for i = 1 to n do output_char out '#' done;
-  output_char out ' ';
-  output_string out s;
-  output_char out '\n'
+let rec output_names = output_bar_list output_name
 
 let output_year out y = output_string out (string_of_int y)
 
-let output_field out n v =
-  output_string out "* ";
-  output_string out n;
-  output_string out ": ";
-  output_string out v;
-  output_char out '\n'
+(* UTF-8 Byte Order Mark *)
+let output_bom out =
+  output_char out '\xEF';
+  output_char out '\xBB';
+  output_char out '\xBF'
 
-let output_opt_field n out v =
-  match v with None -> () | Some v -> output_field n out v
+(* Markdown Printing *)
 
-let check_article project out previous article =
-  let current = project article in
-  if String.equal previous current
-  then previous
-  else (output_heading out 2 current; output_char out '\n'; current)
+module Markdown = struct
 
-let check_article_conference = check_article (fun { conference = c; _ } -> c)
-let check_article_session = check_article (fun { session = s; _ } -> s)
-
-let output_article check_current out current
-    ({ title; authors; doi; url; _ } as article) =
-  let current = check_current out current article in
-  output_heading out 3 title;
-  output_names out authors;
-  output_opt_field out "DOI" doi;
-  output_opt_field out "URL" url;
-  output_char out '\n';
-  current
-
-let output_conference out
-    { title; chair; cochair; where; published; articles; _} =
-  output_heading out 1 title;
-  output_name out chair;
-  (match cochair with
-   | None -> ()
-   | Some cochair -> output_string out " | "; output_name out cochair);
-  output_char out '\n';
-  output_field out "At" where;
-  output_field out "Published" published;
-  output_char out '\n';
-  ignore (List.fold_left (output_article check_article_session out) "" articles)
-
-let output_pc_year was_chair was_cochair out year =
-  output_year out year;
-  if was_chair year then output_string out " (chair)"
-  else if was_cochair year then output_string out " (cochair)"
-
-let output_summary name (Info { articles; pcs; chair; cochair }) out =
-  output_heading out 1 (string_of_name name);
-  output_char out '\n';
-  (if pcs <> [] then begin
-    output_string out "* PCs: ";
-    output_list
-      (output_pc_year (fun y -> List.mem y chair)
-                      (fun y -> List.mem y cochair)) out pcs;
+  let output_heading out n s =
+    for i = 1 to n do output_char out '#' done;
+    output_char out ' ';
+    output_string out s;
     output_char out '\n'
-  end);
-  ignore (List.fold_left
-            (output_article check_article_conference out) "" articles)
+
+  let output_field out n v =
+    output_string out "* ";
+    output_string out n;
+    output_string out ": ";
+    output_string out v;
+    output_char out '\n'
+
+  let output_opt_field n out v =
+    match v with None -> () | Some v -> output_field n out v
+
+  let check_article project out previous article =
+    let current = project article in
+    if String.equal previous current
+    then previous
+    else (output_heading out 2 current; output_char out '\n'; current)
+
+  let check_article_conference = check_article (fun { conference = c; _ } -> c)
+  let check_article_session = check_article (fun { session = s; _ } -> s)
+
+  let output_article check_current out current
+      ({ title; authors; doi; url; _ } as article) =
+    let current = check_current out current article in
+    output_heading out 3 title;
+    output_names out authors;
+    output_opt_field out "DOI" doi;
+    output_opt_field out "URL" url;
+    output_char out '\n';
+    current
+
+  let output_conference out
+      { title; chair; cochair; where; published; articles; _} =
+    output_heading out 1 title;
+    output_name out chair;
+    (match cochair with
+     | None -> ()
+     | Some cochair -> output_string out " | "; output_name out cochair);
+    output_char out '\n';
+    output_field out "At" where;
+    output_field out "Published" published;
+    output_char out '\n';
+    ignore (List.fold_left (output_article check_article_session out) "" articles)
+
+  let output_pc_year was_chair was_cochair out year =
+    output_year out year;
+    if was_chair year then output_string out " (chair)"
+    else if was_cochair year then output_string out " (cochair)"
+
+  let output_summary name (Info { articles; pcs; chair; cochair }) out =
+    output_heading out 1 (string_of_name name);
+    output_char out '\n';
+    (if pcs <> [] then begin
+      output_string out "* PCs: ";
+      output_bar_list
+        (output_pc_year (fun y -> List.mem y chair)
+                        (fun y -> List.mem y cochair)) out pcs;
+      output_char out '\n'
+    end);
+    ignore (List.fold_left
+              (output_article check_article_conference out) "" articles)
+
+end
 
 (* HTML generation *)
 
@@ -732,7 +738,7 @@ let load_file filename =
   close_in fin
 
 let output_conferences outc =
-  List.(iter (output_conference outc) (rev !conferences))
+  List.(iter (Markdown.output_conference outc) (rev !conferences))
 
 let output_conferences_to_file filename =
   let fout = open_out filename in
@@ -753,7 +759,7 @@ let make_name_summaries path =
   in
   let summarize name =
     let Info ({ articles; pcs; _ } as info) = get_name_info name in
-    to_output (output_summary name
+    to_output (Markdown.output_summary name
                   (Info { info with articles = List.rev articles;
                                     pcs = List.rev pcs }))
       (make_path name)
